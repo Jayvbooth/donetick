@@ -1,13 +1,13 @@
 # 10: Add recurring Bills with scoring and household surfaces
 
 **Parent spec:** `../spec.md`  
-**Blocked by:** 02: Add timing-aware scoring to the existing Task result flow; 03: Turn the root route into a focused Today experience; 06: Add Daily Reset and momentum through ordinary Donetick behavior; 08: Add Calendar Items, birthdays, and a unified household calendar  
+**Blocked by:** 02: Add timing-aware scoring to the existing Task result flow; 03: Turn the root route into a focused Today experience; 04: Add bounded reminder presets and reusable notification routing; 06: Add Daily Reset and momentum through ordinary Donetick behavior; 08: Add Calendar Items, birthdays, and a unified household calendar  
 **Status:** ready-for-agent  
 **Repositories:** paired backend and frontend PRs
 
 ## What to build
 
-Add a compact Bill domain for one-time and recurring household obligations. Let a responsible Member record, pay, verify autopay, skip, or deactivate a Bill; preserve compact history; apply deadline scoring once; and surface Bills in Today, Calendar, and Daily Reset.
+Add a compact Bill domain for one-time and recurring household obligations. Let a responsible Member record, pay, verify autopay, skip, or deactivate a Bill; preserve compact history; apply deadline scoring once; and surface Bills in Today, Calendar, Daily Reset, and the existing notification path.
 
 ## Acceptance criteria
 
@@ -21,8 +21,9 @@ Add a compact Bill domain for one-time and recurring household obligations. Let 
 - [ ] Today shows Bills before and when they become due.
 - [ ] The unified calendar displays Bills from their authoritative records and opens the Bill route.
 - [ ] Daily Reset includes tomorrow's and unresolved visible Bills.
+- [ ] Bill notifications reuse ticket 04's scheduler and authoritative route target rather than adding a Bill-specific delivery path.
 - [ ] Bill privacy and responsibility are enforced at the server seam.
-- [ ] Behavioral tests cover recurrence, month-end dates, amount/history preservation, idempotent payment, scoring, autopay verification, visibility, and timezone handling.
+- [ ] Behavioral tests cover recurrence, month-end dates, amount/history preservation, idempotent payment, scoring, notification routing, autopay verification, visibility, and timezone handling.
 - [ ] Additive migrations are verified for supported SQLite and PostgreSQL paths.
 
 ## Constraints carried from the parent spec
