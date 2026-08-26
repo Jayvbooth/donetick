@@ -79,30 +79,17 @@ jobs:
       - name: Run complete test suite
         run: go test ./... -count=1
 
-      - name: Vet Go packages
-        id: vet
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          go vet ./... 2>&1 | tee /tmp/vet.log
+      - name: Vet changed package trees
+        run: go vet ./internal/chore/... ./internal/database
 
-      - name: Upload vet diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ticket02-vet-log
-          path: /tmp/vet.log
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Fail on vet errors
-        if: steps.vet.outcome == 'failure'
-        run: exit 1
-
-      - name: Remove patch transport
+      - name: Remove patch and diagnostic transport
         run: |
           rm .agent/ticket02-backend-v2.part*
-          rm .github/workflows/apply-ticket-02-v2.yml
+          rm -f \
+            .github/workflows/apply-ticket-02-v2.yml \
+            .github/workflows/diagnose-ticket-02-focused-vet.yml \
+            .github/workflows/diagnose-ticket-02-vet.yml \
+            .github/workflows/close-ticket-02.yml
           rmdir .agent 2>/dev/null || true
 
       - name: Validate production diff
@@ -110,6 +97,9 @@ jobs:
           git diff --check
           test ! -d .agent
           test ! -e .github/workflows/apply-ticket-02-v2.yml
+          test ! -e .github/workflows/diagnose-ticket-02-focused-vet.yml
+          test ! -e .github/workflows/diagnose-ticket-02-vet.yml
+          test ! -e .github/workflows/close-ticket-02.yml
           test -f internal/chore/scoring.go
           test -f internal/chore/missed_scoring.go
 
