@@ -18,6 +18,11 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+var (
+	ErrChoreChanged      = errors.New("chore changed before action completed")
+	ErrMissAlreadyScored = errors.New("miss already scored")
+)
+
 type ChoreRepository struct {
 	db     *gorm.DB
 	dbType string
@@ -410,122 +415,101 @@ func (r *ChoreRepository) SoftDelete(c context.Context, id int, userID int, circ
 }
 
 func (r *ChoreRepository) SetChorePendingApproval(c context.Context, chore *chModel.Chore, note *string, userID int, completedDate *time.Time) error {
-	nextVersion, err := r.nextSyncVersion(c, chore.CircleID)
-	if err != nil {
-		return err
-	}
-	err = r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
-		// Look for existing chore history with start or pause status
-		var existingHistory chModel.ChoreHistory
-		err := tx.Where("chore_id = ? AND status = ? ",
-			chore.ID, chModel.ChoreHistoryStatusStarted).
-			First(&existingHistory).Error
-
-		var ch *chModel.ChoreHistory
-		switch {
-		case err == nil:
-			// Update existing history record to mark as pending approval
-			existingHistory.PerformedAt = completedDate
-			existingHistory.Note = note
-			existingHistory.Status = chModel.ChoreHistoryStatusPendingApproval
-			ch = &existingHistory
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			// Create a new chore history record
-			ch = &chModel.ChoreHistory{
-				ChoreID:     chore.ID,
-				PerformedAt: completedDate,
-				CompletedBy: userID,
-				AssignedTo:  chore.AssignedTo,
-				DueDate:     chore.NextDueDate,
-				Note:        note,
-				Status:      chModel.ChoreHistoryStatusPendingApproval,
-			}
-		default:
-			return err
-		}
-
-		ch.SyncVersion = nextVersion
-		if err := tx.Save(ch).Error; err != nil {
-			return err
-		}
-
-		// Set chore status to pending approval
-		if err := tx.Model(&chModel.Chore{}).Where("id = ?", chore.ID).Updates(map[string]interface{}{
-			"status":       chModel.ChoreStatusPendingApproval,
-			"sync_version": nextVersion,
-		}).Error; err != nil {
-			return err
-		}
-
-		// if there is any time session associated with the chore, mark them as finished:
-		var timeSessions []*chModel.TimeSession
-		tx.Model(&chModel.TimeSession{}).Where("chore_id = ? AND status < ?", chore.ID, chModel.TimeSessionStatusCompleted).Find(&timeSessions)
-		if len(timeSessions) != 0 {
-			for _, session := range timeSessions {
-				session.Finish(userID)
-			}
-			if err := tx.Save(&timeSessions).Error; err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
-	return err
-}
-
-func (r *ChoreRepository) ApproveChore(c context.Context, chore *chModel.Chore, adminUserID int, dueDate *time.Time, nextAssignedTo *int, applyPoints bool) error {
-	nextVersion, err := r.nextSyncVersion(c, chore.CircleID)
-	if err != nil {
-		return err
-	}
-	err = r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
-		choreUpdates := map[string]interface{}{}
-		choreUpdates["next_due_date"] = dueDate
-		choreUpdates["status"] = chModel.ChoreStatusNoStatus
-		choreUpdates["sync_version"] = nextVersion
-
-		if dueDate != nil {
-			choreUpdates["assigned_to"] = nextAssignedTo
-		} else {
-			// one time task
-			choreUpdates["is_active"] = false
-		}
-
-		// Get the latest history entry that's pending approval and update it to completed
-		var history chModel.ChoreHistory
-		err := tx.Where("chore_id = ? AND status = ?", chore.ID, chModel.ChoreHistoryStatusPendingApproval).
-			Order("performed_at desc").
-			First(&history).Error
+	return r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
+		nextVersion, err := r.nextSyncVersionWithDB(c, tx, chore.CircleID)
 		if err != nil {
 			return err
 		}
 
-		// Update status to completed
-		history.Status = chModel.ChoreHistoryStatusCompleted
-		history.SyncVersion = nextVersion
+		result := tx.Model(&chModel.Chore{}).
+			Where("id = ? AND circle_id = ? AND is_active = ? AND status != ? AND sync_version = ?", chore.ID, chore.CircleID, true, chModel.ChoreStatusPendingApproval, chore.SyncVersion).
+			Updates(map[string]interface{}{
+				"status":       chModel.ChoreStatusPendingApproval,
+				"sync_version": nextVersion,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrChoreChanged
+		}
 
-		// Update UserCircle Points if applicable
-		if applyPoints && chore.Points != nil && *chore.Points > 0 {
-			history.Points = chore.Points
-			if err := tx.Model(&cModel.UserCircle{}).Where("user_id = ? AND circle_id = ?", history.CompletedBy, chore.CircleID).Update("points", gorm.Expr("points + ?", chore.Points)).Error; err != nil {
-				return err
+		var existingHistory chModel.ChoreHistory
+		historyErr := tx.Where("chore_id = ? AND status = ?", chore.ID, chModel.ChoreHistoryStatusStarted).First(&existingHistory).Error
+		var history *chModel.ChoreHistory
+		switch {
+		case historyErr == nil:
+			existingHistory.PerformedAt = completedDate
+			existingHistory.Note = note
+			existingHistory.Status = chModel.ChoreHistoryStatusPendingApproval
+			history = &existingHistory
+		case errors.Is(historyErr, gorm.ErrRecordNotFound):
+			history = &chModel.ChoreHistory{
+				ChoreID: chore.ID, PerformedAt: completedDate, CompletedBy: userID,
+				AssignedTo: chore.AssignedTo, DueDate: chore.NextDueDate, Note: note,
+				Status: chModel.ChoreHistoryStatusPendingApproval,
 			}
+		default:
+			return historyErr
 		}
-
-		// Save the updated history
-		if err := tx.Save(&history).Error; err != nil {
+		history.SyncVersion = nextVersion
+		if err := tx.Save(history).Error; err != nil {
 			return err
 		}
 
-		// Perform the update operation once, using the prepared updates map.
-		if err := tx.Model(&chModel.Chore{}).Where("id = ?", chore.ID).Updates(choreUpdates).Error; err != nil {
+		var sessions []*chModel.TimeSession
+		if err := tx.Where("chore_id = ? AND status < ?", chore.ID, chModel.TimeSessionStatusCompleted).Find(&sessions).Error; err != nil {
 			return err
 		}
-
+		for _, session := range sessions {
+			session.Finish(userID)
+		}
+		if len(sessions) > 0 {
+			return tx.Save(&sessions).Error
+		}
 		return nil
 	})
-	return err
+}
+
+func (r *ChoreRepository) ApproveChore(c context.Context, chore *chModel.Chore, adminUserID int, dueDate *time.Time, nextAssignedTo *int, score *chModel.ScoreResult) error {
+	return r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
+		nextVersion, err := r.nextSyncVersionWithDB(c, tx, chore.CircleID)
+		if err != nil {
+			return err
+		}
+		updates := map[string]interface{}{
+			"next_due_date": dueDate,
+			"status":        chModel.ChoreStatusNoStatus,
+			"sync_version":  nextVersion,
+		}
+		if dueDate != nil {
+			updates["assigned_to"] = nextAssignedTo
+		} else {
+			updates["is_active"] = false
+		}
+
+		result := tx.Model(&chModel.Chore{}).
+			Where("id = ? AND circle_id = ? AND status = ? AND sync_version = ?", chore.ID, chore.CircleID, chModel.ChoreStatusPendingApproval, chore.SyncVersion).
+			Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrChoreChanged
+		}
+
+		var history chModel.ChoreHistory
+		if err := tx.Where("chore_id = ? AND status = ?", chore.ID, chModel.ChoreHistoryStatusPendingApproval).
+			Order("performed_at desc").First(&history).Error; err != nil {
+			return err
+		}
+		history.Status = chModel.ChoreHistoryStatusCompleted
+		history.SyncVersion = nextVersion
+		if err := r.applyScore(tx, &history, history.CompletedBy, chore.CircleID, score); err != nil {
+			return err
+		}
+		return tx.Save(&history).Error
+	})
 }
 
 func (r *ChoreRepository) RejectChore(c context.Context, choreID int, circleID int, rejectionNote *string) error {
@@ -564,90 +548,111 @@ func (r *ChoreRepository) RejectChore(c context.Context, choreID int, circleID i
 	})
 }
 
-func (r *ChoreRepository) CompleteChore(c context.Context, chore *chModel.Chore, note *string, userID int, dueDate *time.Time, completedDate *time.Time, nextAssignedTo *int, applyPoints bool) error {
-	nextVersion, err := r.nextSyncVersion(c, chore.CircleID)
-	if err != nil {
-		return err
-	}
-	err = r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
-
-		choreUpdates := map[string]interface{}{}
-		choreUpdates["next_due_date"] = dueDate
-		choreUpdates["status"] = chModel.ChoreStatusNoStatus
-		choreUpdates["sync_version"] = nextVersion
-
+func (r *ChoreRepository) CompleteChore(c context.Context, chore *chModel.Chore, note *string, userID int, dueDate *time.Time, completedDate *time.Time, nextAssignedTo *int, score *chModel.ScoreResult) error {
+	return r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
+		nextVersion, err := r.nextSyncVersionWithDB(c, tx, chore.CircleID)
+		if err != nil {
+			return err
+		}
+		updates := map[string]interface{}{
+			"next_due_date": dueDate,
+			"status":        chModel.ChoreStatusNoStatus,
+			"sync_version":  nextVersion,
+		}
 		switch {
 		case dueDate != nil:
-			choreUpdates["assigned_to"] = nextAssignedTo
-		case chore.FrequencyType == "trigger":
-			// In case of trigger frequency type we need to still set the next assigned but need the task archived.
-			choreUpdates["assigned_to"] = nextAssignedTo
-			choreUpdates["is_active"] = false
+			updates["assigned_to"] = nextAssignedTo
+		case chore.FrequencyType == chModel.FrequencyTypeTrigger:
+			updates["assigned_to"] = nextAssignedTo
+			updates["is_active"] = false
 		default:
-			// one time task
-			choreUpdates["is_active"] = false
+			updates["is_active"] = false
 		}
 
-		// Look for existing chore history with start or pause status
-		var existingHistory chModel.ChoreHistory
-		err := tx.Where("chore_id = ? AND status = ? ",
-			chore.ID, chModel.ChoreHistoryStatusStarted).
-			First(&existingHistory).Error
+		result := tx.Model(&chModel.Chore{}).
+			Where("id = ? AND circle_id = ? AND is_active = ? AND status != ? AND sync_version = ?", chore.ID, chore.CircleID, true, chModel.ChoreStatusPendingApproval, chore.SyncVersion).
+			Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrChoreChanged
+		}
 
-		var ch *chModel.ChoreHistory
+		var existingHistory chModel.ChoreHistory
+		historyErr := tx.Where("chore_id = ? AND status = ?", chore.ID, chModel.ChoreHistoryStatusStarted).First(&existingHistory).Error
+		var history *chModel.ChoreHistory
 		switch {
-		case err == nil:
-			// Update existing history record
+		case historyErr == nil:
 			existingHistory.PerformedAt = completedDate
 			existingHistory.Note = note
 			existingHistory.Status = chModel.ChoreHistoryStatusCompleted
-			ch = &existingHistory
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			// Create a new chore history record
-			ch = &chModel.ChoreHistory{
-				ChoreID:     chore.ID,
-				PerformedAt: completedDate,
-				CompletedBy: userID,
-				AssignedTo:  chore.AssignedTo,
-				DueDate:     chore.NextDueDate,
-				Note:        note,
-				Status:      chModel.ChoreHistoryStatusCompleted,
+			history = &existingHistory
+		case errors.Is(historyErr, gorm.ErrRecordNotFound):
+			history = &chModel.ChoreHistory{
+				ChoreID: chore.ID, PerformedAt: completedDate, CompletedBy: userID,
+				AssignedTo: chore.AssignedTo, DueDate: chore.NextDueDate, Note: note,
+				Status: chModel.ChoreHistoryStatusCompleted,
 			}
 		default:
+			return historyErr
+		}
+		history.SyncVersion = nextVersion
+		if err := r.applyScore(tx, history, userID, chore.CircleID, score); err != nil {
+			return err
+		}
+		if err := tx.Save(history).Error; err != nil {
 			return err
 		}
 
-		// Update UserCirclee Points :
-		if applyPoints && chore.Points != nil && *chore.Points > 0 {
-			ch.Points = chore.Points
-			if err := tx.Model(&cModel.UserCircle{}).Where("user_id = ? AND circle_id = ?", userID, chore.CircleID).Update("points", gorm.Expr("points + ?", chore.Points)).Error; err != nil {
-				return err
-			}
-		}
-		ch.SyncVersion = nextVersion
-		// Perform the update operation once, using the prepared updates map.
-		if err := tx.Model(&chModel.Chore{}).Where("id = ?", chore.ID).Updates(choreUpdates).Error; err != nil {
+		var sessions []*chModel.TimeSession
+		if err := tx.Where("chore_id = ? AND status < ?", chore.ID, chModel.TimeSessionStatusCompleted).Find(&sessions).Error; err != nil {
 			return err
 		}
-
-		if err := tx.Save(ch).Error; err != nil {
-			return err
+		for _, session := range sessions {
+			session.Finish(userID)
 		}
-		// if there is any time session associated with the chore, mark them as finished:
-		var timeSessions []*chModel.TimeSession
-		tx.Model(&chModel.TimeSession{}).Where("chore_id = ? AND status < ?", chore.ID, chModel.TimeSessionStatusCompleted).Find(&timeSessions)
-		if len(timeSessions) != 0 {
-			for _, session := range timeSessions {
-				session.Finish(userID)
-			}
-			if err := tx.Save(&timeSessions).Error; err != nil {
-				return err
-			}
+		if len(sessions) > 0 {
+			return tx.Save(&sessions).Error
 		}
-
 		return nil
 	})
-	return err
+}
+
+func (r *ChoreRepository) applyScore(tx *gorm.DB, history *chModel.ChoreHistory, userID, circleID int, score *chModel.ScoreResult) error {
+	if score == nil {
+		return nil
+	}
+
+	query := tx.Where("user_id = ? AND circle_id = ? AND is_active = ?", userID, circleID, true)
+	if r.dbType == "postgres" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	var member cModel.UserCircle
+	if err := query.First(&member).Error; err != nil {
+		return fmt.Errorf("active circle membership not found for user %d: %w", userID, err)
+	}
+
+	appliedTotal := score.Total
+	if member.Points+appliedTotal < 0 {
+		appliedTotal = -member.Points
+	}
+	base := score.BasePoints
+	timing := score.TimingAdjustment + (appliedTotal - score.Total)
+	recovery := score.RecoveryPoints
+	history.Points = &appliedTotal
+	history.BasePoints = &base
+	history.TimingAdjustment = &timing
+	history.RecoveryPoints = &recovery
+
+	result := tx.Model(&member).Update("points", gorm.Expr("points + ?", appliedTotal))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("active circle membership not found for user %d", userID)
+	}
+	return nil
 }
 
 func (r *ChoreRepository) SkipChore(c context.Context, chore *chModel.Chore, userID int, dueDate *time.Time, nextAssignedTo *int, skippedAt *time.Time) error {
@@ -949,6 +954,9 @@ func (r *ChoreRepository) GetChoreDetailByID(c context.Context, choreID int, cir
         chores.created_by,
 		chores.priority,
 		chores.completion_window,
+		chores.points,
+		chores.timing_mode,
+		chores.early_bonus,
 		chores.status,
 		chores.is_active,
 		chores.sync_version,
@@ -1258,6 +1266,68 @@ func (r *ChoreRepository) GetUserLastChoreAction(c context.Context, choreID int,
 }
 
 // UndoChoreAction undoes a chore action by restoring previous state and removing the history entry
+// GetMissedScoreCandidates returns only active, assigned scored chores whose due
+// time has passed. The scoring service applies the timing-mode-specific boundary.
+func (r *ChoreRepository) GetMissedScoreCandidates(c context.Context, now time.Time) ([]*chModel.Chore, error) {
+	var chores []*chModel.Chore
+	err := r.db.WithContext(c).
+		Where("is_active = ? AND status != ?", true, chModel.ChoreStatusPendingApproval).
+		Where("assigned_to IS NOT NULL AND next_due_date IS NOT NULL AND next_due_date <= ?", now.UTC()).
+		Where("points IS NOT NULL AND points > 0").
+		Where("timing_mode IN ?", []chModel.TimingMode{chModel.TimingModeToday, chModel.TimingModeDeadline, chModel.TimingModeWindow}).
+		Find(&chores).Error
+	return chores, err
+}
+
+// RecordMissedScore records one bounded miss for the current due date while
+// leaving the task unresolved. A row lock plus the matching history check makes
+// the operation idempotent without introducing an occurrence ledger.
+func (r *ChoreRepository) RecordMissedScore(c context.Context, chore *chModel.Chore, recordedAt time.Time, score *chModel.ScoreResult) error {
+	if chore == nil || chore.NextDueDate == nil || chore.AssignedTo == nil || score == nil {
+		return nil
+	}
+	return r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
+		query := tx.WithContext(c)
+		if r.dbType == "postgres" {
+			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		var current chModel.Chore
+		if err := query.First(&current, chore.ID).Error; err != nil {
+			return err
+		}
+		if !current.IsActive || current.Status == chModel.ChoreStatusPendingApproval || current.NextDueDate == nil || !current.NextDueDate.Equal(*chore.NextDueDate) || current.AssignedTo == nil {
+			return ErrChoreChanged
+		}
+
+		var count int64
+		if err := tx.Model(&chModel.ChoreHistory{}).
+			Where("chore_id = ? AND status = ? AND due_date = ?", current.ID, chModel.ChoreHistoryStatusMissed, current.NextDueDate).
+			Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			return ErrMissAlreadyScored
+		}
+
+		nextVersion, err := r.nextSyncVersionWithDB(c, tx, current.CircleID)
+		if err != nil {
+			return err
+		}
+		history := &chModel.ChoreHistory{
+			ChoreID: current.ID, PerformedAt: timePointer(recordedAt.UTC()),
+			CompletedBy: *current.AssignedTo, AssignedTo: current.AssignedTo,
+			DueDate: current.NextDueDate, Status: chModel.ChoreHistoryStatusMissed,
+			SyncVersion: nextVersion,
+		}
+		if err := r.applyScore(tx, history, *current.AssignedTo, current.CircleID, score); err != nil {
+			return err
+		}
+		return tx.Create(history).Error
+	})
+}
+
+func timePointer(value time.Time) *time.Time { return &value }
+
 func (r *ChoreRepository) UndoChoreAction(c context.Context, choreID int, historyID int, circleID int, previousAssignedTo *int, previousDueDate *time.Time) error {
 	nextVersion, err := r.nextSyncVersion(c, circleID)
 	if err != nil {
@@ -1303,18 +1373,16 @@ func (r *ChoreRepository) UndoChoreAction(c context.Context, choreID int, histor
 			return err
 		}
 
-		// Remove points if they were added during completion/approval
-		if historyToUndo.Points != nil && *historyToUndo.Points > 0 &&
-			(historyToUndo.Status == chModel.ChoreHistoryStatusCompleted) {
-			// Get the chore to find circle ID
+		// Reverse the exact signed result that the completion applied.
+		if historyToUndo.Points != nil && historyToUndo.Status == chModel.ChoreHistoryStatusCompleted {
 			var chore chModel.Chore
 			if err := tx.Select("circle_id").First(&chore, choreID).Error; err != nil {
 				return err
 			}
-			// Subtract points from user
+			delta := *historyToUndo.Points
 			if err := tx.Model(&cModel.UserCircle{}).
 				Where("user_id = ? AND circle_id = ?", historyToUndo.CompletedBy, chore.CircleID).
-				Update("points", gorm.Expr("points - ?", *historyToUndo.Points)).Error; err != nil {
+				Update("points", gorm.Expr("CASE WHEN points - ? < 0 THEN 0 ELSE points - ? END", delta, delta)).Error; err != nil {
 				return err
 			}
 		}
