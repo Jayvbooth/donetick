@@ -70,7 +70,7 @@
  		return tx.Create(history).Error
 --- a/internal/chore/repo/scoring_test.go
 +++ b/internal/chore/repo/scoring_test.go
-@@ -81,6 +81,15 @@
+@@ -81,6 +81,17 @@
  	var member cModel.UserCircle
  	require.NoError(t, db.Where("user_id = ? AND circle_id = ?", 1, 1).First(&member).Error)
  	require.Zero(t, member.Points)
@@ -81,8 +81,10 @@
 +	require.Equal(t, -2, *history.Points)
 +	require.NotNil(t, history.TimingAdjustment)
 +	require.Equal(t, -2, *history.TimingAdjustment)
-+	require.Nil(t, history.BasePoints)
-+	require.Nil(t, history.RecoveryPoints)
++	require.NotNil(t, history.BasePoints)
++	require.Zero(t, *history.BasePoints)
++	require.NotNil(t, history.RecoveryPoints)
++	require.Zero(t, *history.RecoveryPoints)
  }
  
  func TestRecordMissedScoreIsIdempotentAndRecoveryRestoresCredit(t *testing.T) {
