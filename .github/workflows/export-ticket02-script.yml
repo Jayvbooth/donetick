@@ -13,9 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore historical patch script
+        run: git show 16e470cb5cf48180a127a95a769abf610de82e4d:.agent/apply_02.py > /tmp/apply_02.py
       - uses: actions/upload-artifact@v4
         with:
           name: ticket02-backend-script
-          path: .agent/apply_02.py
+          path: /tmp/apply_02.py
           if-no-files-found: error
           retention-days: 1
