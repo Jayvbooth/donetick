@@ -81,6 +81,17 @@ func TestApplyScoreNeverDropsCirclePointsBelowZero(t *testing.T) {
 	var member cModel.UserCircle
 	require.NoError(t, db.Where("user_id = ? AND circle_id = ?", 1, 1).First(&member).Error)
 	require.Zero(t, member.Points)
+
+	var history chModel.ChoreHistory
+	require.NoError(t, db.Where("chore_id = ? AND status = ?", chore.ID, chModel.ChoreHistoryStatusMissed).First(&history).Error)
+	require.NotNil(t, history.Points)
+	require.Equal(t, -2, *history.Points)
+	require.NotNil(t, history.TimingAdjustment)
+	require.Equal(t, -2, *history.TimingAdjustment)
+	require.NotNil(t, history.BasePoints)
+	require.Zero(t, *history.BasePoints)
+	require.NotNil(t, history.RecoveryPoints)
+	require.Zero(t, *history.RecoveryPoints)
 }
 
 func TestRecordMissedScoreIsIdempotentAndRecoveryRestoresCredit(t *testing.T) {

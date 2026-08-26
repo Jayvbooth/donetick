@@ -505,7 +505,7 @@ func (r *ChoreRepository) ApproveChore(c context.Context, chore *chModel.Chore, 
 		}
 		history.Status = chModel.ChoreHistoryStatusCompleted
 		history.SyncVersion = nextVersion
-		if err := applyScore(tx, &history, history.CompletedBy, chore.CircleID, score); err != nil {
+		if err := r.applyScore(tx, &history, history.CompletedBy, chore.CircleID, score); err != nil {
 			return err
 		}
 		return tx.Save(&history).Error
@@ -598,7 +598,7 @@ func (r *ChoreRepository) CompleteChore(c context.Context, chore *chModel.Chore,
 			return historyErr
 		}
 		history.SyncVersion = nextVersion
-		if err := applyScore(tx, history, userID, chore.CircleID, score); err != nil {
+		if err := r.applyScore(tx, history, userID, chore.CircleID, score); err != nil {
 			return err
 		}
 		if err := tx.Save(history).Error; err != nil {
@@ -619,22 +619,33 @@ func (r *ChoreRepository) CompleteChore(c context.Context, chore *chModel.Chore,
 	})
 }
 
-func applyScore(tx *gorm.DB, history *chModel.ChoreHistory, userID, circleID int, score *chModel.ScoreResult) error {
+func (r *ChoreRepository) applyScore(tx *gorm.DB, history *chModel.ChoreHistory, userID, circleID int, score *chModel.ScoreResult) error {
 	if score == nil {
 		return nil
 	}
-	total := score.Total
+
+	query := tx.Where("user_id = ? AND circle_id = ? AND is_active = ?", userID, circleID, true)
+	if r.dbType == "postgres" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	var member cModel.UserCircle
+	if err := query.First(&member).Error; err != nil {
+		return fmt.Errorf("active circle membership not found for user %d: %w", userID, err)
+	}
+
+	appliedTotal := score.Total
+	if member.Points+appliedTotal < 0 {
+		appliedTotal = -member.Points
+	}
 	base := score.BasePoints
-	timing := score.TimingAdjustment
+	timing := score.TimingAdjustment + (appliedTotal - score.Total)
 	recovery := score.RecoveryPoints
-	history.Points = &total
+	history.Points = &appliedTotal
 	history.BasePoints = &base
 	history.TimingAdjustment = &timing
 	history.RecoveryPoints = &recovery
 
-	result := tx.Model(&cModel.UserCircle{}).
-		Where("user_id = ? AND circle_id = ?", userID, circleID).
-		Update("points", gorm.Expr("CASE WHEN points + ? < 0 THEN 0 ELSE points + ? END", total, total))
+	result := tx.Model(&member).Update("points", gorm.Expr("points + ?", appliedTotal))
 	if result.Error != nil {
 		return result.Error
 	}
@@ -1308,7 +1319,7 @@ func (r *ChoreRepository) RecordMissedScore(c context.Context, chore *chModel.Ch
 			DueDate: current.NextDueDate, Status: chModel.ChoreHistoryStatusMissed,
 			SyncVersion: nextVersion,
 		}
-		if err := applyScore(tx, history, *current.AssignedTo, current.CircleID, score); err != nil {
+		if err := r.applyScore(tx, history, *current.AssignedTo, current.CircleID, score); err != nil {
 			return err
 		}
 		return tx.Create(history).Error
