@@ -1,0 +1,88 @@
+--- a/internal/chore/repo/repository.go
++++ b/internal/chore/repo/repository.go
+@@ -505,7 +505,7 @@
+ 		}
+ 		history.Status = chModel.ChoreHistoryStatusCompleted
+ 		history.SyncVersion = nextVersion
+-		if err := applyScore(tx, &history, history.CompletedBy, chore.CircleID, score); err != nil {
++		if err := r.applyScore(tx, &history, history.CompletedBy, chore.CircleID, score); err != nil {
+ 			return err
+ 		}
+ 		return tx.Save(&history).Error
+@@ -598,7 +598,7 @@
+ 			return historyErr
+ 		}
+ 		history.SyncVersion = nextVersion
+-		if err := applyScore(tx, history, userID, chore.CircleID, score); err != nil {
++		if err := r.applyScore(tx, history, userID, chore.CircleID, score); err != nil {
+ 			return err
+ 		}
+ 		if err := tx.Save(history).Error; err != nil {
+@@ -619,22 +619,33 @@
+ 	})
+ }
+ 
+-func applyScore(tx *gorm.DB, history *chModel.ChoreHistory, userID, circleID int, score *chModel.ScoreResult) error {
++func (r *ChoreRepository) applyScore(tx *gorm.DB, history *chModel.ChoreHistory, userID, circleID int, score *chModel.ScoreResult) error {
+ 	if score == nil {
+ 		return nil
+ 	}
+-	total := score.Total
++
++	query := tx.Where("user_id = ? AND circle_id = ? AND is_active = ?", userID, circleID, true)
++	if r.dbType == "postgres" {
++		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
++	}
++	var member cModel.UserCircle
++	if err := query.First(&member).Error; err != nil {
++		return fmt.Errorf("active circle membership not found for user %d: %w", userID, err)
++	}
++
++	appliedTotal := score.Total
++	if member.Points+appliedTotal < 0 {
++		appliedTotal = -member.Points
++	}
+ 	base := score.BasePoints
+-	timing := score.TimingAdjustment
++	timing := score.TimingAdjustment + (appliedTotal - score.Total)
+ 	recovery := score.RecoveryPoints
+-	history.Points = &total
++	history.Points = &appliedTotal
+ 	history.BasePoints = &base
+ 	history.TimingAdjustment = &timing
+ 	history.RecoveryPoints = &recovery
+ 
+-	result := tx.Model(&cModel.UserCircle{}).
+-		Where("user_id = ? AND circle_id = ?", userID, circleID).
+-		Update("points", gorm.Expr("CASE WHEN points + ? < 0 THEN 0 ELSE points + ? END", total, total))
++	result := tx.Model(&member).Update("points", gorm.Expr("points + ?", appliedTotal))
+ 	if result.Error != nil {
+ 		return result.Error
+ 	}
+@@ -1308,7 +1319,7 @@
+ 			DueDate: current.NextDueDate, Status: chModel.ChoreHistoryStatusMissed,
+ 			SyncVersion: nextVersion,
+ 		}
+-		if err := applyScore(tx, history, *current.AssignedTo, current.CircleID, score); err != nil {
++		if err := r.applyScore(tx, history, *current.AssignedTo, current.CircleID, score); err != nil {
+ 			return err
+ 		}
+ 		return tx.Create(history).Error
+--- a/internal/chore/repo/scoring_test.go
++++ b/internal/chore/repo/scoring_test.go
+@@ -81,6 +81,15 @@
+ 	var member cModel.UserCircle
+ 	require.NoError(t, db.Where("user_id = ? AND circle_id = ?", 1, 1).First(&member).Error)
+ 	require.Zero(t, member.Points)
++
++	var history chModel.ChoreHistory
++	require.NoError(t, db.Where("chore_id = ? AND status = ?", chore.ID, chModel.ChoreHistoryStatusMissed).First(&history).Error)
++	require.NotNil(t, history.Points)
++	require.Equal(t, -2, *history.Points)
++	require.NotNil(t, history.TimingAdjustment)
++	require.Equal(t, -2, *history.TimingAdjustment)
++	require.Nil(t, history.BasePoints)
++	require.Nil(t, history.RecoveryPoints)
+ }
+ 
+ func TestRecordMissedScoreIsIdempotentAndRecoveryRestoresCredit(t *testing.T) {
