@@ -1,0 +1,70 @@
+name: Apply Ticket 02 Backend
+
+on:
+  push:
+    branches:
+      - feature/02-timing-aware-scoring-real
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ticket-02-backend-real
+  cancel-in-progress: false
+
+jobs:
+  apply-and-verify:
+    if: ${{ !contains(github.event.head_commit.message, '[ticket-02-backend]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.3'
+          cache: true
+
+      - name: Fetch and apply the production patch
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/Jayvbooth/donetick/temp/ticket02-backend-source/.agent/apply_ticket_02.py -o /tmp/apply_ticket_02.py
+          python /tmp/apply_ticket_02.py
+
+      - name: Format modified Go files
+        run: |
+          gofmt -w \
+            internal/chore/model/model.go \
+            internal/chore/scoring.go \
+            internal/chore/scoring_test.go \
+            internal/chore/handler.go \
+            internal/chore/api.go \
+            internal/chore/validator.go \
+            internal/chore/repo/repository.go \
+            internal/chore/repo/scoring_test.go
+
+      - name: Check UTC discipline
+        run: bash scripts/check-time-utc.sh
+
+      - name: Run focused tests
+        run: go test ./internal/chore/... -count=1
+
+      - name: Run complete test suite
+        run: go test ./... -count=1
+
+      - name: Vet Go packages
+        run: go vet ./...
+
+      - name: Remove temporary automation
+        run: rm .github/workflows/apply-ticket-02-backend.yml
+
+      - name: Validate diff
+        run: git diff --check
+
+      - name: Commit verified implementation
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'feat: add timing-aware task scoring [ticket-02-backend]'
+          git push origin HEAD:feature/02-timing-aware-scoring-real

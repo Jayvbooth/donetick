@@ -1,0 +1,52 @@
+name: Verify Ticket 02 Local Day Test
+
+on:
+  push:
+    branches:
+      - feature/02-timing-aware-scoring-real
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ticket-02-backend-timezone-test
+  cancel-in-progress: false
+
+jobs:
+  apply-and-verify:
+    if: ${{ !contains(github.event.head_commit.message, '[ticket-02-timezone-test]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.3'
+          cache: true
+
+      - name: Add local-day coverage
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/Jayvbooth/donetick/temp/ticket02-backend-source/.agent/apply_timezone_test.py -o /tmp/apply_timezone_test.py
+          python /tmp/apply_timezone_test.py
+          gofmt -w internal/chore/scoring_test.go
+
+      - name: Verify backend
+        run: |
+          bash scripts/check-time-utc.sh
+          go test ./internal/chore/... -count=1
+          go test ./... -count=1
+          go vet ./...
+          git diff --check
+
+      - name: Remove temporary automation
+        run: rm .github/workflows/apply-ticket-02-timezone-test.yml
+
+      - name: Commit verified coverage
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'test: cover local-day scoring timezone [ticket-02-timezone-test]'
+          git push origin HEAD:feature/02-timing-aware-scoring-real
