@@ -21,6 +21,7 @@ func ChoreReqStructLevelValidation(sl validator.StructLevel) {
 		validateNotifications(sl, req) // 3. Validate Notifications
 	}
 	validateConcurrencyControl(sl, req) // 4. Validate Optimistic Concurrency Control
+	validateScoring(sl, req)            // 5. Validate scoring configuration
 }
 
 func validateFrequencyLogic(sl validator.StructLevel, req ChoreReq) {
@@ -120,5 +121,27 @@ func validateConcurrencyControl(sl validator.StructLevel, req ChoreReq) {
 		if req.UpdatedAt.After(maxAllowedTime) {
 			sl.ReportError(req.UpdatedAt, "UpdatedAt", "updatedAt", "cannot_be_in_future", "")
 		}
+	}
+}
+
+func validateScoring(sl validator.StructLevel, req ChoreReq) {
+	mode := req.TimingMode
+	if mode == "" || mode == chModel.TimingModeUntimed {
+		if req.EarlyBonus != nil && *req.EarlyBonus {
+			sl.ReportError(req.EarlyBonus, "EarlyBonus", "earlyBonus", "requires_deadline_mode", "")
+		}
+		return
+	}
+	if req.Points == nil || *req.Points <= 0 {
+		sl.ReportError(req.Points, "Points", "points", "required_with_timing_mode", "")
+	}
+	if req.NextDueDate == nil {
+		sl.ReportError(req.NextDueDate, "NextDueDate", "nextDueDate", "required_with_timing_mode", "")
+	}
+	if req.EarlyBonus != nil && *req.EarlyBonus && mode != chModel.TimingModeDeadline {
+		sl.ReportError(req.EarlyBonus, "EarlyBonus", "earlyBonus", "requires_deadline_mode", "")
+	}
+	if mode == chModel.TimingModeWindow && (req.CompletionWindow == nil || *req.CompletionWindow <= 0) {
+		sl.ReportError(req.CompletionWindow, "CompletionWindow", "completionWindow", "required_with_window_mode", "")
 	}
 }

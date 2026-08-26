@@ -90,6 +90,7 @@ func main() {
 		fx.Provide(database.NewDatabase),
 		fx.Provide(chRepo.NewChoreRepository),
 		fx.Provide(chore.NewHandler),
+		fx.Provide(chore.NewMissedScoringService),
 		fx.Provide(uRepo.NewUserRepository),
 		fx.Provide(user.NewDeletionService),
 		fx.Provide(user.NewHandler),
@@ -228,7 +229,7 @@ func main() {
 
 }
 
-func newServer(lc fx.Lifecycle, cfg *config.Config, db *gorm.DB, notifier *notifier.Scheduler, eventProducer *events.EventsProducer, mfaCleanup *mfa.CleanupService, authCleanup *auth.CleanupService, rts *realtime.RealTimeService, draftCleanup *storage.DraftCleanupService, ticketStore *realtime.TicketStore) *gin.Engine {
+func newServer(lc fx.Lifecycle, cfg *config.Config, db *gorm.DB, notifier *notifier.Scheduler, missedScoring *chore.MissedScoringService, eventProducer *events.EventsProducer, mfaCleanup *mfa.CleanupService, authCleanup *auth.CleanupService, rts *realtime.RealTimeService, draftCleanup *storage.DraftCleanupService, ticketStore *realtime.TicketStore) *gin.Engine {
 	// Set Gin mode based on logging configuration
 	if cfg.Logging.Development || strings.ToLower(cfg.Logging.Level) == "debug" {
 		gin.SetMode(gin.DebugMode)
@@ -287,6 +288,7 @@ func newServer(lc fx.Lifecycle, cfg *config.Config, db *gorm.DB, notifier *notif
 				}
 			}
 			notifier.Start(context.Background())
+			missedScoring.Start(context.Background())
 			eventProducer.Start(context.Background())
 			mfaCleanup.Start(context.Background())
 			authCleanup.Start(context.Background())
@@ -320,6 +322,7 @@ func newServer(lc fx.Lifecycle, cfg *config.Config, db *gorm.DB, notifier *notif
 				log.Printf("Real-time service shutdown timeout, forcing shutdown")
 			}
 
+			missedScoring.Stop()
 			mfaCleanup.Stop()
 			authCleanup.Stop()
 			draftCleanup.Stop()

@@ -33,6 +33,24 @@ const (
 	FrequencyTypeNoRepeat      FrequencyType = "no_repeat"
 )
 
+type TimingMode string
+
+const (
+	TimingModeUntimed  TimingMode = "untimed"
+	TimingModeToday    TimingMode = "today"
+	TimingModeDeadline TimingMode = "deadline"
+	TimingModeWindow   TimingMode = "window"
+)
+
+// ScoreResult is the compact, player-facing explanation of one scored result.
+// The final signed delta is stored in Total and mirrored to ChoreHistory.Points.
+type ScoreResult struct {
+	BasePoints       int `json:"basePoints"`
+	TimingAdjustment int `json:"timingAdjustment"`
+	RecoveryPoints   int `json:"recoveryPoints"`
+	Total            int `json:"total"`
+}
+
 type AssignmentStrategy string
 
 const (
@@ -69,7 +87,9 @@ type Chore struct {
 	Status                 Status                     `json:"status" gorm:"column:status"`                                                            //
 	Priority               int                        `json:"priority" gorm:"column:priority"`                                                        //
 	CompletionWindow       *int                       `json:"completionWindow,omitempty" gorm:"column:completion_window"`                             // Number seconds before the chore is due that it can be completed
-	Points                 *int                       `json:"points,omitempty" gorm:"column:points"`                                                  // Points for completing the chore
+	Points                 *int                       `json:"points,omitempty" gorm:"column:points"`                                                  // Base Points for completing the chore
+	TimingMode             TimingMode                 `json:"timingMode" gorm:"column:timing_mode;not null;default:untimed"`                          // How due timing changes the reward
+	EarlyBonus             bool                       `json:"earlyBonus" gorm:"column:early_bonus;not null;default:false"`                            // Whether useful early completion earns a bonus
 	Description            *string                    `json:"description,omitempty" gorm:"type:text;column:description"`                              // Description of the chore
 	SubTasks               *[]stModel.SubTask         `json:"subTasks,omitempty" gorm:"foreignkey:ChoreID;references:ID"`                             // Subtasks for the chore
 	RequireApproval        bool                       `json:"requireApproval" gorm:"column:require_approval"`                                         // Whether chore completion requires admin approval
@@ -95,19 +115,22 @@ type ChoreAssignees struct {
 	UserID  int `json:"userId" gorm:"column:user_id;uniqueIndex:idx_chore_user"` // The user this assignee is for
 }
 type ChoreHistory struct {
-	ID          int                `json:"id" gorm:"primary_key"`                                       // Unique identifier
-	ChoreID     int                `json:"choreId" gorm:"column:chore_id"`                              // The chore this history is for
-	PerformedAt *time.Time         `json:"performedAt" gorm:"column:performed_at"`                      // When the chore was performed (completed or skipped)
-	CompletedBy int                `json:"completedBy" gorm:"column:completed_by"`                      // Who completed the chore
-	AssignedTo  *int               `json:"assignedTo" gorm:"column:assigned_to"`                        // Who the chore was assigned to
-	Note        *string            `json:"notes" gorm:"column:notes"`                                   // Notes about the chore
-	DueDate     *time.Time         `json:"dueDate" gorm:"column:due_date"`                              // When the chore was due
-	UpdatedAt   *time.Time         `json:"updatedAt" gorm:"column:updated_at"`                          // When the record was last updated
-	CreatedAt   time.Time          `json:"createdAt" gorm:"column:created_at;autoCreateTime;<-:create"` // When the record was created (immutable after insert)
-	Status      ChoreHistoryStatus `json:"status" gorm:"column:status"`                                 // Status of the chore (1=completed, 2=skipped)
-	Points      *int               `json:"points,omitempty" gorm:"column:points"`                       // Points for completing the chore
-	Duration    *int               `json:"duration,omitempty" gorm:"<-:false;-:migration"`              // Duration in seconds calculated from query (read-only, no DB column)
-	SyncVersion int64              `json:"syncVersion" gorm:"column:sync_version;not null;default:0;index:idx_chore_history_sync_version"`
+	ID               int                `json:"id" gorm:"primary_key"`                                       // Unique identifier
+	ChoreID          int                `json:"choreId" gorm:"column:chore_id"`                              // The chore this history is for
+	PerformedAt      *time.Time         `json:"performedAt" gorm:"column:performed_at"`                      // When the chore was performed (completed or skipped)
+	CompletedBy      int                `json:"completedBy" gorm:"column:completed_by"`                      // Who completed the chore
+	AssignedTo       *int               `json:"assignedTo" gorm:"column:assigned_to"`                        // Who the chore was assigned to
+	Note             *string            `json:"notes" gorm:"column:notes"`                                   // Notes about the chore
+	DueDate          *time.Time         `json:"dueDate" gorm:"column:due_date"`                              // When the chore was due
+	UpdatedAt        *time.Time         `json:"updatedAt" gorm:"column:updated_at"`                          // When the record was last updated
+	CreatedAt        time.Time          `json:"createdAt" gorm:"column:created_at;autoCreateTime;<-:create"` // When the record was created (immutable after insert)
+	Status           ChoreHistoryStatus `json:"status" gorm:"column:status"`                                 // Status of the chore (1=completed, 2=skipped)
+	Points           *int               `json:"points,omitempty" gorm:"column:points"`                       // Final signed Points delta
+	BasePoints       *int               `json:"basePoints,omitempty" gorm:"column:base_points"`              // Configured base reward
+	TimingAdjustment *int               `json:"timingAdjustment,omitempty" gorm:"column:timing_adjustment"`  // Early or late adjustment
+	RecoveryPoints   *int               `json:"recoveryPoints,omitempty" gorm:"column:recovery_points"`      // Restoration after a recorded miss
+	Duration         *int               `json:"duration,omitempty" gorm:"<-:false;-:migration"`              // Duration in seconds calculated from query (read-only, no DB column)
+	SyncVersion      int64              `json:"syncVersion" gorm:"column:sync_version;not null;default:0;index:idx_chore_history_sync_version"`
 }
 
 type ChoreHistoryStatus int8
@@ -183,6 +206,9 @@ type ChoreDetail struct {
 	Notes               *string                    `json:"notes" gorm:"column:notes"`
 	CreatedBy           int                        `json:"createdBy" gorm:"column:created_by"`
 	CompletionWindow    *int                       `json:"completionWindow,omitempty" gorm:"column:completion_window"`
+	Points              *int                       `json:"points,omitempty" gorm:"column:points"`
+	TimingMode          TimingMode                 `json:"timingMode" gorm:"column:timing_mode"`
+	EarlyBonus          bool                       `json:"earlyBonus" gorm:"column:early_bonus"`
 	Subtasks            *[]stModel.SubTask         `json:"subTasks,omitempty" gorm:"foreignkey:ChoreID;references:ID"`
 	Status              Status                     `json:"status" gorm:"column:status"`
 	Duration            int                        `json:"duration" gorm:"column:duration"` // Total duration in seconds for the chore
@@ -291,6 +317,9 @@ func (c *Chore) CanView(userID int, circleUsers []*cModel.UserCircleDetail) bool
 	return false
 }
 func (c *Chore) CanComplete(userID int, circleUsers []*cModel.UserCircleDetail) bool {
+	if !c.IsActive || c.Status == ChoreStatusPendingApproval {
+		return false
+	}
 	// If using no assignee strategy, allow any circle member to complete
 	if c.AssignStrategy == AssignmentStrategyNoAssignee && (c.AssignedTo == nil || *c.AssignedTo == 0) {
 		if !c.IsPrivate {
