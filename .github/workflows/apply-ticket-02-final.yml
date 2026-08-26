@@ -42,7 +42,7 @@ jobs:
 
       - name: Apply the reviewed production patch
         run: |
-          cat .agent/ticket02-backend.part* | base64 -d | gzip -d > /tmp/ticket02.patch
+          base64 -d .agent/ticket02-backend.patch.gz.b64 | gzip -d > /tmp/ticket02.patch
           git apply --check /tmp/ticket02.patch
           git apply /tmp/ticket02.patch
 
