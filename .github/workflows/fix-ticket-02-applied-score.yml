@@ -42,7 +42,7 @@ jobs:
 
       - name: Apply exact-result fix
         run: |
-          echo '7732b70b23d4dccc392316385ef0315f16ebcc662e09ed895a18095f240f6578  .agent/ticket02-clamp-fix.patch' | sha256sum -c -
+          echo 'c66fb85b1f619b81efbc6eee52997f29c454aa115669a2a16abf5e929b27da36  .agent/ticket02-clamp-fix.patch' | sha256sum -c -
           git apply --check .agent/ticket02-clamp-fix.patch
           git apply .agent/ticket02-clamp-fix.patch
           gofmt -w internal/chore/repo/repository.go internal/chore/repo/scoring_test.go
