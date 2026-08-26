@@ -80,7 +80,24 @@ jobs:
         run: go test ./... -count=1
 
       - name: Vet Go packages
-        run: go vet ./...
+        id: vet
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          go vet ./... 2>&1 | tee /tmp/vet.log
+
+      - name: Upload vet diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ticket02-vet-log
+          path: /tmp/vet.log
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Fail on vet errors
+        if: steps.vet.outcome == 'failure'
+        run: exit 1
 
       - name: Remove patch transport
         run: |
