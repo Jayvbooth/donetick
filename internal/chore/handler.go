@@ -322,6 +322,8 @@ type ChoreReq struct {
 	Priority             *int                          `json:"priority" binding:"omitempty"`
 	CompletionWindow     *int                          `json:"completionWindow" binding:"omitempty"`
 	Points               *int                          `json:"points" binding:"omitempty"`
+	TimingMode           chModel.TimingMode            `json:"timingMode" binding:"omitempty,oneof=untimed today deadline window"`
+	EarlyBonus           *bool                         `json:"earlyBonus"`
 	Description          *string                       `json:"description" binding:"omitempty"`
 	SubTasks             *[]stModel.SubTask            `json:"subTasks" binding:"omitempty,dive"`
 	RequireApproval      bool                          `json:"requireApproval" binding:"omitempty"`
@@ -516,6 +518,7 @@ func (h *Handler) CreateChore(c *gin.Context) {
 	}
 
 	warnings := setCreateChoreDefaults(&choreReq)
+	normalizeScoringSettings(&choreReq, currentUser.Timezone)
 	if !choreReq.Notification && choreReq.NotificationMetadata != nil {
 		warnings = append(warnings, "notificationMetadata provided while notification is false; ignoring metadata")
 		choreReq.NotificationMetadata = nil
@@ -539,6 +542,8 @@ func (h *Handler) CreateChore(c *gin.Context) {
 		CreatedAt:              time.Now().UTC(),
 		CircleID:               currentUser.CircleID,
 		Points:                 choreReq.Points,
+		TimingMode:             choreReq.TimingMode,
+		EarlyBonus:             *choreReq.EarlyBonus,
 		CompletionWindow:       choreReq.CompletionWindow,
 		Description:            choreReq.Description,
 		Priority:               *choreReq.Priority,
@@ -664,6 +669,10 @@ func setCreateChoreDefaults(choreReq *ChoreReq) []string {
 		val := false
 		choreReq.IsPrivate = &val
 		warnings = append(warnings, "isPrivate not provided, defaulting to false")
+	}
+	if choreReq.EarlyBonus == nil {
+		val := false
+		choreReq.EarlyBonus = &val
 	}
 
 	return warnings
@@ -827,6 +836,7 @@ func (h *Handler) EditChore(c *gin.Context) {
 	}
 
 	setEditChoreDefaults(&choreReq, oldChore)
+	normalizeScoringSettings(&choreReq, currentUser.Timezone)
 
 	updatedChore := &chModel.Chore{ // TODO: Assignees are missing
 		ID:                     choreReq.ID,
@@ -846,6 +856,8 @@ func (h *Handler) EditChore(c *gin.Context) {
 		CreatedBy:              oldChore.CreatedBy,
 		CreatedAt:              oldChore.CreatedAt,
 		Points:                 choreReq.Points,
+		TimingMode:             choreReq.TimingMode,
+		EarlyBonus:             *choreReq.EarlyBonus,
 		CompletionWindow:       choreReq.CompletionWindow,
 		Description:            choreReq.Description,
 		Priority:               *choreReq.Priority,
@@ -913,7 +925,6 @@ func (h *Handler) EditChore(c *gin.Context) {
 		}
 	}
 
-
 	if dueDatesDiffer(oldChore.NextDueDate, updatedChore.NextDueDate) {
 		historyEntry := &chModel.ChoreHistory{
 			ChoreID:     oldChore.ID,
@@ -972,6 +983,42 @@ func setEditChoreDefaults(choreReq *ChoreReq, oldChore *chModel.Chore) {
 
 	if choreReq.IsPrivate == nil {
 		choreReq.IsPrivate = &oldChore.IsPrivate
+	}
+	if choreReq.TimingMode == "" {
+		choreReq.TimingMode = oldChore.TimingMode
+	}
+	if choreReq.EarlyBonus == nil {
+		value := oldChore.EarlyBonus
+		choreReq.EarlyBonus = &value
+	}
+	if choreReq.FrequencyMetadata == nil && oldChore.FrequencyMetadataV2 != nil {
+		metadata := *oldChore.FrequencyMetadataV2
+		choreReq.FrequencyMetadata = &metadata
+	}
+}
+
+func normalizeScoringSettings(choreReq *ChoreReq, fallbackTimezone string) {
+	if choreReq.TimingMode == "" || choreReq.Points == nil || *choreReq.Points <= 0 {
+		choreReq.TimingMode = chModel.TimingModeUntimed
+	}
+	if choreReq.EarlyBonus == nil {
+		value := false
+		choreReq.EarlyBonus = &value
+	}
+	if choreReq.TimingMode != chModel.TimingModeDeadline {
+		*choreReq.EarlyBonus = false
+	}
+	if choreReq.TimingMode != chModel.TimingModeToday {
+		return
+	}
+	if choreReq.FrequencyMetadata == nil {
+		choreReq.FrequencyMetadata = &chModel.FrequencyMetadata{}
+	}
+	if choreReq.FrequencyMetadata.Timezone == "" {
+		if fallbackTimezone == "" {
+			fallbackTimezone = "UTC"
+		}
+		choreReq.FrequencyMetadata.Timezone = fallbackTimezone
 	}
 }
 
@@ -2284,9 +2331,11 @@ func (h *Handler) CompleteChore(c *gin.Context) {
 	if chore.RequireApproval {
 		// Set chore status to pending approval instead of completing
 		if err := h.choreRepo.SetChorePendingApproval(c, chore, note, completedBy, &completedDate); err != nil {
-			c.JSON(500, gin.H{
-				"error": "Error setting chore pending approval",
-			})
+			status := http.StatusInternalServerError
+			if errors.Is(err, chRepo.ErrChoreChanged) {
+				status = http.StatusConflict
+			}
+			c.JSON(status, gin.H{"error": "Error setting chore pending approval"})
 			return
 		}
 
@@ -2325,10 +2374,13 @@ func (h *Handler) CompleteChore(c *gin.Context) {
 		return
 	}
 
-	if err := h.choreRepo.CompleteChore(c, chore, note, completedBy, nextDueDate, &completedDate, nextAssignedTo, true); err != nil {
-		c.JSON(500, gin.H{
-			"error": "Error completing chore",
-		})
+	score := scoreForChore(chore, completedDate, completionOutcome(choreHistory, chore.NextDueDate))
+	if err := h.choreRepo.CompleteChore(c, chore, note, completedBy, nextDueDate, &completedDate, nextAssignedTo, score); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, chRepo.ErrChoreChanged) {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{"error": "Error completing chore"})
 		return
 	}
 	updatedChore, err := h.choreRepo.GetChore(c, id, effectiveUser.ID, actualUser.CircleID)
@@ -2362,7 +2414,8 @@ func (h *Handler) CompleteChore(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{
-		"res": updatedChore,
+		"res":   updatedChore,
+		"score": score,
 	})
 }
 
@@ -3482,6 +3535,7 @@ func (h *Handler) ApproveChore(c *gin.Context) {
 
 	completedBy := pendingHistory.CompletedBy
 	completedDate := *pendingHistory.PerformedAt
+	score := scoreForChore(chore, completedDate, completionOutcome(allHistory, pendingHistory.DueDate))
 
 	// Calculate next due date and assignee like in normal completion
 	var nextDueDate *time.Time
@@ -3520,10 +3574,12 @@ func (h *Handler) ApproveChore(c *gin.Context) {
 	}
 
 	// Approve the chore
-	if err := h.choreRepo.ApproveChore(c, chore, currentUser.ID, nextDueDate, nextAssignedTo, true); err != nil {
-		c.JSON(500, gin.H{
-			"error": "Error approving chore",
-		})
+	if err := h.choreRepo.ApproveChore(c, chore, currentUser.ID, nextDueDate, nextAssignedTo, score); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, chRepo.ErrChoreChanged) {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{"error": "Error approving chore"})
 		return
 	}
 
@@ -3552,6 +3608,7 @@ func (h *Handler) ApproveChore(c *gin.Context) {
 	c.JSON(200, gin.H{
 		"res":     updatedChore,
 		"message": "Chore approved successfully",
+		"score":   score,
 	})
 }
 
