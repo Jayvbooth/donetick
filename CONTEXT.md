@@ -2,7 +2,7 @@
 
 ## Circle
 
-The shared Donetick household or support workspace whose members can collaborate on shared items.
+The shared household or support workspace whose Members can collaborate on Shared Items.
 
 ## Member
 
@@ -10,15 +10,15 @@ A person with a separate username and password who belongs to a Circle.
 
 ## Supporter
 
-A Member who helps with shared responsibilities or responds to an explicit help request. Supporter does not mean unrestricted access to another Member's private items.
+A Member who helps with shared responsibilities or responds to an explicit help request. Supporter does not mean unrestricted access to another Member's Private Items.
 
 ## Task
 
-A concrete action that can be completed once. In the existing code, a Task is represented by a Chore with one-time scheduling.
+A concrete action that can be completed once.
 
 ## Routine
 
-A Task that repeats according to a schedule. In the existing code, a Routine is represented by a recurring Chore.
+A Task that repeats according to a schedule.
 
 ## Goal
 
@@ -46,7 +46,7 @@ The end-of-day flow that resolves unfinished Tasks, reviews tomorrow, and closes
 
 ## Points
 
-The existing Donetick household score balance.
+The household score balance.
 
 ## XP
 
@@ -54,7 +54,7 @@ The user-facing presentation of Points when showing progress, levels, completion
 
 ## Scoring Policy
 
-The small set of rules that converts a Task result into a point change based on base value, timing mode, lateness, recovery, and streak eligibility.
+The small set of rules that converts a Task result into a point change based on base value, Timing Mode, lateness, recovery, and streak eligibility.
 
 ## Timing Mode
 
@@ -70,8 +70,8 @@ A typed or spoken raw capture that produces editable proposals for Tasks, subtas
 
 ## Shared Item
 
-An item visible to the Circle according to existing visibility rules.
+An item visible to the Circle according to its sharing rules.
 
 ## Private Item
 
-An item visible only to its creator and permitted assignees according to existing Donetick privacy behavior.
+An item visible only to its creator and explicitly permitted Members.
