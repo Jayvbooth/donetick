@@ -1,0 +1,98 @@
+name: Close Ticket 03
+
+on:
+  push:
+    branches:
+      - temp/close-ticket03
+
+permissions:
+  contents: write
+
+concurrency:
+  group: close-ticket-03
+  cancel-in-progress: false
+
+jobs:
+  close-ticket:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Wait for merged frontend implementation
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 80); do
+            router=$(curl -fsSL https://raw.githubusercontent.com/Jayvbooth/frontend/develop/src/contexts/RouterContext.jsx 2>/dev/null || true)
+            today_status=$(curl -sS -o /tmp/Today.jsx -w '%{http_code}' https://raw.githubusercontent.com/Jayvbooth/frontend/develop/src/views/Today/Today.jsx || true)
+            if [ "$today_status" = '200' ] \
+              && printf '%s' "$router" | grep -q "element: <Today" \
+              && printf '%s' "$router" | grep -q "path: '/chores'"; then
+              exit 0
+            fi
+            sleep 15
+          done
+          echo 'Frontend Ticket 03 implementation did not reach develop.' >&2
+          exit 1
+
+      - name: Resolve merged pull request
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, urllib.request
+          url = 'https://api.github.com/repos/Jayvbooth/frontend/pulls?state=closed&head=Jayvbooth:feature/03-focused-today&per_page=20'
+          req = urllib.request.Request(url, headers={'User-Agent': 'ticket-03-tracker'})
+          pulls = json.load(urllib.request.urlopen(req, timeout=30))
+          merged = [pr for pr in pulls if pr.get('merged_at')]
+          if not merged:
+              raise SystemExit('No merged Ticket 03 frontend PR found')
+          merged.sort(key=lambda pr: pr['merged_at'], reverse=True)
+          open('/tmp/frontend-pr-number', 'w').write(str(merged[0]['number']))
+          PY
+
+      - name: Check out planning repository
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Mark Ticket 03 done
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          pr = Path('/tmp/frontend-pr-number').read_text().strip()
+          path = Path('.scratch/gamified-life-system/issues/03-focused-today.md')
+          text = path.read_text()
+          for old in ('**Status:** ready-for-agent', '**Status:** in-review'):
+              if old in text:
+                  text = text.replace(old, '**Status:** done', 1)
+                  break
+          if '**Status:** done' not in text:
+              raise RuntimeError('Ticket 03 status was not recognized')
+          implementation = f'**Implementation:** `Jayvbooth/frontend#{pr}`  '
+          merged = f'**Merged:** `Jayvbooth/frontend#{pr}`  '
+          lines = text.splitlines()
+          status_index = next(i for i, line in enumerate(lines) if line.startswith('**Status:**'))
+          insert_at = status_index + 1
+          existing = set(lines)
+          additions = []
+          if implementation not in existing:
+              additions.append(implementation)
+          if merged not in existing:
+              additions.append(merged)
+          if additions:
+              lines[insert_at:insert_at] = additions
+          path.write_text('\n'.join(lines) + ('\n' if text.endswith('\n') else ''))
+          PY
+          git diff --check
+          grep -q '^\*\*Status:\*\* done' .scratch/gamified-life-system/issues/03-focused-today.md
+          grep -q '^\*\*Merged:\*\* `Jayvbooth/frontend#' .scratch/gamified-life-system/issues/03-focused-today.md
+
+      - name: Commit tracker closure
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .scratch/gamified-life-system/issues/03-focused-today.md
+          git commit -m 'docs: mark Ticket 03 done [ticket-03-close]'
+          git push origin HEAD:develop
